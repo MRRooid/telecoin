@@ -1,6 +1,6 @@
 """
 💰 TeleCoin Pro — Premium FinTech Market Terminal
-Version: 6.4 — 40 markets + Auto-Update
+Version: 7.0 — Glass Edition
 File: 1.py
 """
 import tkinter as tk
@@ -14,8 +14,36 @@ import os
 import json
 import queue
 import time
+import sys
+import shutil
+import tempfile
+import subprocess
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+# ═══════════════════════════════════════════════════════════════
+# 🔧 EXE / Python Detection
+# ═══════════════════════════════════════════════════════════════
+def is_frozen():
+    return getattr(sys, "frozen", False)
+
+
+def get_app_dir():
+    if is_frozen():
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def get_app_path():
+    if is_frozen():
+        return sys.executable
+    return os.path.abspath(__file__)
+
+
+APP_DIR = get_app_dir()
+APP_PATH = get_app_path()
+IS_EXE = is_frozen()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -42,10 +70,230 @@ except Exception:
 
 
 # ═══════════════════════════════════════════════════════════════
+# 🌐 GITHUB SETTINGS
+# ═══════════════════════════════════════════════════════════════
+GITHUB_USER = "MRRooid"
+GITHUB_REPO = "telecoin"
+GITHUB_BRANCH = "main"
+
+VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/{GITHUB_BRANCH}/version.json"
+PY_URL = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/{GITHUB_BRANCH}/1.py"
+EXE_URL = f"https://github.com/{GITHUB_USER}/{GITHUB_REPO}/releases/latest/download/TeleCoin.exe"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 🔄 AUTO-UPDATE
+# ═══════════════════════════════════════════════════════════════
+LOCAL_VERSION_FILE = os.path.join(APP_DIR, "version.json")
+BACKUP_SUFFIX = ".backup"
+
+
+def get_local_version():
+    try:
+        if os.path.exists(LOCAL_VERSION_FILE):
+            with open(LOCAL_VERSION_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return str(data.get("version", "0.0"))
+    except Exception:
+        pass
+    return "7.0"
+
+
+def save_local_version(version, changelog=""):
+    try:
+        data = {
+            "version": str(version),
+            "updated_at": datetime.now().isoformat(),
+            "changelog": changelog,
+        }
+        with open(LOCAL_VERSION_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def check_for_update(timeout=10):
+    result = {
+        "available": False,
+        "current_version": get_local_version(),
+        "latest_version": None,
+        "changelog": "",
+        "download_url": EXE_URL if IS_EXE else PY_URL,
+        "error": None,
+    }
+    try:
+        r = requests.get(VERSION_URL, timeout=timeout)
+        if not r.ok:
+            result["error"] = f"HTTP {r.status_code}"
+            return result
+        remote = r.json()
+        latest = str(remote.get("version", "0.0"))
+        result["latest_version"] = latest
+        result["changelog"] = remote.get("changelog", "")
+
+        if remote.get("exe_url") and IS_EXE:
+            result["download_url"] = remote["exe_url"]
+        elif remote.get("download_url") and not IS_EXE:
+            result["download_url"] = remote["download_url"]
+
+        if _version_newer(latest, result["current_version"]):
+            result["available"] = True
+    except requests.exceptions.Timeout:
+        result["error"] = "اتصال timeout"
+    except requests.exceptions.ConnectionError:
+        result["error"] = "اتصال اینترنت نیست"
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+def _version_newer(new, old):
+    try:
+        new_parts = [int(x) for x in str(new).split(".")]
+        old_parts = [int(x) for x in str(old).split(".")]
+        max_len = max(len(new_parts), len(old_parts))
+        new_parts += [0] * (max_len - len(new_parts))
+        old_parts += [0] * (max_len - len(old_parts))
+        return new_parts > old_parts
+    except Exception:
+        return False
+
+
+def download_update(download_url, progress_callback=None, timeout=60):
+    try:
+        r = requests.get(download_url, timeout=timeout, stream=True,
+                         allow_redirects=True)
+        if not r.ok:
+            return False, None, f"HTTP {r.status_code}"
+
+        suffix = ".exe" if IS_EXE else ".py"
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=suffix, prefix="telecoin_")
+        os.close(tmp_fd)
+
+        total = int(r.headers.get("content-length", 0))
+        downloaded = 0
+
+        with open(tmp_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback and total > 0:
+                        pct = int((downloaded / total) * 100)
+                        progress_callback(pct)
+
+        if os.path.getsize(tmp_path) < 5000:
+            os.remove(tmp_path)
+            return False, None, "فایل کوچکه"
+
+        return True, tmp_path, ""
+    except requests.exceptions.Timeout:
+        return False, None, "دانلود timeout"
+    except Exception as e:
+        return False, None, str(e)
+
+
+def install_update(temp_path, version, changelog=""):
+    try:
+        if IS_EXE:
+            return _install_exe(temp_path, version, changelog)
+        else:
+            return _install_py(temp_path, version, changelog)
+    except Exception as e:
+        return False, str(e), None
+
+
+def _install_exe(temp_path, version, changelog):
+    try:
+        current_exe = APP_PATH
+        new_exe = current_exe + ".new"
+        bat_file = os.path.join(APP_DIR, "_update.bat")
+
+        shutil.copy2(temp_path, new_exe)
+
+        bat_content = f"""@echo off
+timeout /t 2 /nobreak > NUL
+:loop
+tasklist /FI "IMAGENAME eq {os.path.basename(current_exe)}" 2>NUL | find /I "{os.path.basename(current_exe)}" >NUL
+if "%ERRORLEVEL%"=="0" (
+    timeout /t 1 /nobreak > NUL
+    goto loop
+)
+del "{current_exe}"
+move "{new_exe}" "{current_exe}"
+start "" "{current_exe}"
+del "%~f0"
+"""
+        with open(bat_file, "w", encoding="utf-8") as f:
+            f.write(bat_content)
+
+        save_local_version(version, changelog)
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
+
+        subprocess.Popen(
+            [bat_file],
+            shell=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            close_fds=True,
+        )
+        return True, "", bat_file
+    except Exception as e:
+        return False, str(e), None
+
+
+def _install_py(temp_path, version, changelog):
+    try:
+        current_py = APP_PATH
+        backup_path = current_py + BACKUP_SUFFIX
+        try:
+            shutil.copy2(current_py, backup_path)
+        except Exception:
+            backup_path = None
+
+        shutil.copy2(temp_path, current_py)
+        save_local_version(version, changelog)
+
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
+        return True, "", backup_path
+    except Exception as e:
+        return False, str(e), None
+
+
+def restart_app():
+    try:
+        if IS_EXE:
+            subprocess.Popen(
+                [APP_PATH],
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                          | subprocess.DETACHED_PROCESS,
+                close_fds=True,
+            )
+        else:
+            python = sys.executable
+            script = APP_PATH
+            subprocess.Popen(
+                [python, script],
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                          | subprocess.DETACHED_PROCESS,
+                close_fds=True,
+            )
+        return True
+    except Exception as e:
+        print(f"[Restart] خطا: {e}")
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════
 # 🔊 SOUND MANAGER
 # ═══════════════════════════════════════════════════════════════
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SOUNDS_DIR = os.path.join(BASE_DIR, "sounds")
+SOUNDS_DIR = os.path.join(APP_DIR, "sounds")
 os.makedirs(SOUNDS_DIR, exist_ok=True)
 
 try:
@@ -148,20 +396,35 @@ sound = SoundManager()
 
 
 # ═══════════════════════════════════════════════════════════════
-# 🎨 DESIGN SYSTEM
+# 🎨 DESIGN SYSTEM — GLASS EDITION
 # ═══════════════════════════════════════════════════════════════
 C = {
-    "bg":            "#05070D",
-    "bg2":           "#080C14",
-    "bg3":           "#0D1220",
-    "card":          "#0E1421",
-    "card_hover":    "#131B2C",
-    "card_active":   "#172138",
-    "card_border":   "#1A2438",
-    "inner":         "#0A1018",
-    "inner_border":  "#182238",
-    "gold":          "#D4AF37",
-    "gold_hi":       "#F5C542",
+    # ── پس‌زمینه ──
+    "bg":            "#03050A",
+    "bg2":           "#05080F",
+    "bg3":           "#0A0F1A",
+
+    # ── شیشه‌ای ──
+    "glass":         "#0F1620",
+    "glass_light":   "#141C2A",
+    "glass_hover":   "#1A2438",
+    "glass_active":  "#1F2A40",
+    "glass_border":  "#2A3852",
+    "glass_shine":   "#3A4A6A",
+
+    # ── کارت‌ها ──
+    "card":          "#0C1220",
+    "card_hover":    "#111A2E",
+    "card_active":   "#162240",
+    "card_border":   "#1E2A44",
+
+    # ── داخلی ──
+    "inner":         "#060A14",
+    "inner_border":  "#16203A",
+
+    # ── رنگ‌ها ──
+    "gold":          "#F5C542",
+    "gold_hi":       "#FFD966",
     "gold_dark":     "#A67C00",
     "cyan":          "#22D3EE",
     "cyan_dark":     "#0891B2",
@@ -171,20 +434,26 @@ C = {
     "danger_dark":   "#E11D48",
     "warning":       "#F59E0B",
     "purple":        "#A855F7",
-    "text":          "#F1F5F9",
+    "pink":          "#EC4899",
+    "blue":          "#3B82F6",
+
+    # ── متن ──
+    "text":          "#F8FAFC",
     "text2":         "#CBD5E1",
     "text3":         "#7B8AA8",
     "text4":         "#495672",
+
+    # ── خطوط ──
     "divider":       "#1A2438",
     "scroll":        "#1A2438",
-    "topbar":        "#0B111C",
+    "topbar":        "#070B14",
 }
 
 
 # ═══════════════════════════════════════════════════════════════
 # 🔤 FONTS
 # ═══════════════════════════════════════════════════════════════
-FONTS_DIR = os.path.join(BASE_DIR, "fonts")
+FONTS_DIR = os.path.join(APP_DIR, "fonts")
 os.makedirs(FONTS_DIR, exist_ok=True)
 
 VAZIR_FONTS = {
@@ -236,6 +505,7 @@ def detect_font():
 
 FONT = "Tahoma"
 
+
 def F(size=11, weight="normal"):
     return (FONT, size, weight)
 
@@ -243,9 +513,9 @@ def F(size=11, weight="normal"):
 # ═══════════════════════════════════════════════════════════════
 # 💾 CONFIG
 # ═══════════════════════════════════════════════════════════════
-ICONS_DIR = os.path.join(BASE_DIR, "icons")
+ICONS_DIR = os.path.join(APP_DIR, "icons")
 UI_ICONS_DIR = os.path.join(ICONS_DIR, "ui")
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 os.makedirs(ICONS_DIR, exist_ok=True)
 os.makedirs(UI_ICONS_DIR, exist_ok=True)
 
@@ -310,6 +580,7 @@ def save_config(cfg):
 # ═══════════════════════════════════════════════════════════════
 _icon_cache = {}
 
+
 def load_icon(key, size=(40, 40), subfolder=None):
     ck = f"{subfolder or ''}_{key}_{size[0]}x{size[1]}"
     if ck in _icon_cache:
@@ -334,15 +605,18 @@ def load_icon(key, size=(40, 40), subfolder=None):
 # ═══════════════════════════════════════════════════════════════
 FA_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 
+
 def to_en(s):
     if s is None:
         return ""
     return str(s).translate(FA_DIGITS)
 
+
 def to_fa(s):
     if s is None:
         return ""
     return str(s).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
+
 
 def hex_alpha(hex_color, alpha=0.5, bg="#05070D"):
     h = hex_color.lstrip("#")
@@ -353,6 +627,7 @@ def hex_alpha(hex_color, alpha=0.5, bg="#05070D"):
     ng = int(g * alpha + bg_ * (1 - alpha))
     nb = int(b * alpha + bb * (1 - alpha))
     return f"#{nr:02x}{ng:02x}{nb:02x}"
+
 
 def fmt_price(n):
     if n is None:
@@ -382,7 +657,7 @@ _session.mount("https://", requests.adapters.HTTPAdapter(
 
 
 # ═══════════════════════════════════════════════════════════════
-# 📱 NOTIFICATIONS
+# 📱 NATIVE NOTIFICATIONS
 # ═══════════════════════════════════════════════════════════════
 def send_native_notification(title, message, timeout=5):
     try:
@@ -438,16 +713,13 @@ def get_nobitex_stats(symbol):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 🌐 ARZDIGITAL — منبع اصلی قیمت
+# 🌐 ARZDIGITAL — منبع اصلی
 # ═══════════════════════════════════════════════════════════════
 ARZDIGITAL_MAP = {
-    # ── ارزهای اصلی ──
     "dolar":    ("currencies", "united-states-dollar"),
     "eur":      ("currencies", "euro"),
     "gbp":      ("currencies", "pound-sterling"),
     "chf":      ("currencies", "swiss-franc"),
-
-    # ── ارزهای محبوب ──
     "aed":      ("currencies", "united-arab-emirates-dirham"),
     "try":      ("currencies", "turkish-lira"),
     "cny":      ("currencies", "chinese-yuan"),
@@ -455,8 +727,6 @@ ARZDIGITAL_MAP = {
     "jpy":      ("currencies", "japanese-yen"),
     "aud":      ("currencies", "australian-dollar"),
     "iqd":      ("currencies", "iraqi-dinar"),
-
-    # ── سایر ارزها ──
     "krw":      ("currencies", "south-korean-won"),
     "nzd":      ("currencies", "new-zealand-dollar"),
     "sgd":      ("currencies", "singapore-dollar"),
@@ -477,8 +747,6 @@ ARZDIGITAL_MAP = {
     "afn":      ("currencies", "afghan-afghani"),
     "azn":      ("currencies", "azerbaijani-manat"),
     "nok":      ("currencies", "norwegian-krone"),
-
-    # ── طلا و سکه ──
     "gold":     ("gold", "gold-gerami-18"),
     "sekeb":    ("gold-coins", "azadi-gold-full"),
 }
@@ -503,7 +771,6 @@ def parse_numeric_price(value):
 
 
 def get_arzdigital_data(item_key):
-    """Returns: (price, change_pct) یا (None, None)"""
     try:
         info = ARZDIGITAL_MAP.get(item_key)
         if not info:
@@ -616,16 +883,13 @@ def get_arzdigital_data(item_key):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 📋 MARKETS DATA — ۴۰ بازار
+# 📋 MARKETS DATA
 # ═══════════════════════════════════════════════════════════════
 ITEMS = [
-    # ── اصلی (major) ──
     {"key":"dolar",  "code":"USD", "name":"دلار آمریکا",     "unit":"۱ دلار",          "cat":"major",  "type":"fiat","accent":"#10B981"},
     {"key":"eur",    "code":"EUR", "name":"یورو",             "unit":"۱ یورو",           "cat":"major",  "type":"fiat","accent":"#3B82F6"},
     {"key":"gbp",    "code":"GBP", "name":"پوند انگلیس",      "unit":"۱ پوند",           "cat":"major",  "type":"fiat","accent":"#DC2626"},
     {"key":"chf",    "code":"CHF", "name":"فرانک سوئیس",      "unit":"۱ فرانک",          "cat":"major",  "type":"fiat","accent":"#DC2626"},
-
-    # ── محبوب (popular) ──
     {"key":"aed",    "code":"AED", "name":"درهم امارات",      "unit":"۱ درهم",           "cat":"popular","type":"fiat","accent":"#059669"},
     {"key":"try",    "code":"TRY", "name":"لیر ترکیه",        "unit":"۱ لیر",            "cat":"popular","type":"fiat","accent":"#EF4444"},
     {"key":"cny",    "code":"CNY", "name":"یوان چین",         "unit":"۱ یوان",           "cat":"popular","type":"fiat","accent":"#EF4444"},
@@ -633,8 +897,6 @@ ITEMS = [
     {"key":"jpy",    "code":"JPY", "name":"ین ژاپن",          "unit":"۱۰۰ ین",           "cat":"popular","type":"fiat","accent":"#DC2626"},
     {"key":"aud",    "code":"AUD", "name":"دلار استرالیا",     "unit":"۱ دلار استرالیا", "cat":"popular","type":"fiat","accent":"#059669"},
     {"key":"iqd",    "code":"IQD", "name":"دینار عراق",        "unit":"۱ دینار",          "cat":"popular","type":"fiat","accent":"#DC2626"},
-
-    # ── سایر ارزها (fiat) ──
     {"key":"krw",    "code":"KRW", "name":"وون کره جنوبی",    "unit":"۱ وون",            "cat":"fiat",   "type":"fiat","accent":"#3B82F6"},
     {"key":"nzd",    "code":"NZD", "name":"دلار نیوزیلند",     "unit":"۱ دلار نیوزیلند", "cat":"fiat",   "type":"fiat","accent":"#0284C7"},
     {"key":"sgd",    "code":"SGD", "name":"دلار سنگاپور",      "unit":"۱ دلار سنگاپور",  "cat":"fiat",   "type":"fiat","accent":"#DC2626"},
@@ -655,12 +917,8 @@ ITEMS = [
     {"key":"afn",    "code":"AFN", "name":"افغانی",           "unit":"۱ افغانی",         "cat":"fiat",   "type":"fiat","accent":"#3B82F6"},
     {"key":"azn",    "code":"AZN", "name":"منات آذربایجان",    "unit":"۱ منات",           "cat":"fiat",   "type":"fiat","accent":"#059669"},
     {"key":"nok",    "code":"NOK", "name":"کرون نروژ",         "unit":"۱ کرون",           "cat":"fiat",   "type":"fiat","accent":"#DC2626"},
-
-    # ── طلا و سکه (metal) ──
     {"key":"gold",   "code":"XAU", "name":"طلای ۱۸ عیار",      "unit":"۱ گرم",            "cat":"metal",  "type":"fiat","accent":"#FBBF24"},
     {"key":"sekeb",  "code":"SEK", "name":"سکه بهار آزادی",   "unit":"۱ سکه",            "cat":"metal",  "type":"fiat","accent":"#FBBF24"},
-
-    # ── رمزارزها (crypto) — ۸ مورد ──
     {"key":"tether", "code":"USDT","name":"تتر",              "unit":"۱ تتر",            "cat":"crypto", "type":"crypto","symbol":"usdt","accent":"#26A17B"},
     {"key":"btc",    "code":"BTC", "name":"بیت‌کوین",          "unit":"۱ بیت‌کوین",       "cat":"crypto", "type":"crypto","symbol":"btc","accent":"#F7931A"},
     {"key":"eth",    "code":"ETH", "name":"اتریوم",            "unit":"۱ اتریوم",         "cat":"crypto", "type":"crypto","symbol":"eth","accent":"#627EEA"},
@@ -672,7 +930,6 @@ ITEMS = [
 
 
 def fetch_price(item):
-    """Returns: (price, change_pct) یا (None, None)"""
     try:
         if item["type"] == "fiat":
             return get_arzdigital_data(item["key"])
@@ -687,34 +944,7 @@ def fetch_price(item):
 
 
 # ═══════════════════════════════════════════════════════════════
-# ⏰ WORLD CLOCKS
-# ═══════════════════════════════════════════════════════════════
-CITIES = [
-    ("تهران",   "Asia/Tehran",      "IR"),
-    ("دبی",     "Asia/Dubai",       "AE"),
-    ("استانبول","Europe/Istanbul",  "TR"),
-    ("لندن",    "Europe/London",    "GB"),
-    ("نیویورک", "America/New_York", "US"),
-    ("توکیو",   "Asia/Tokyo",       "JP"),
-]
-
-
-def get_city_time(tz_name):
-    try:
-        import zoneinfo
-        tz = zoneinfo.ZoneInfo(tz_name)
-    except Exception:
-        offsets = {
-            "Asia/Tehran": 3.5, "Asia/Dubai": 4,
-            "Europe/London": 0, "America/New_York": -5,
-            "Asia/Tokyo": 9, "Europe/Istanbul": 3,
-        }
-        tz = timezone(timedelta(hours=offsets.get(tz_name, 0)))
-    return datetime.now(tz).strftime("%H:%M")
-
-
-# ═══════════════════════════════════════════════════════════════
-# 🧩 COMPONENT: TOAST NOTIFICATION
+# 🧩 TOAST NOTIFICATION
 # ═══════════════════════════════════════════════════════════════
 class ToastNotification(ctk.CTkToplevel):
     _active = []
@@ -794,17 +1024,17 @@ class ToastNotification(ctk.CTkToplevel):
                 ToastNotification._active.remove(self)
         except Exception:
             pass
-
+            
 
 # ═══════════════════════════════════════════════════════════════
-# 🧩 COMPONENT: STATUS BADGE
+# 🧩 STATUS BADGE
 # ═══════════════════════════════════════════════════════════════
 class StatusBadge(ctk.CTkFrame):
     def __init__(self, master):
-        super().__init__(master, fg_color=C["inner"], corner_radius=10,
-                          border_width=1, border_color=C["divider"])
+        super().__init__(master, fg_color=C["glass"], corner_radius=12,
+                          border_width=1, border_color=C["glass_border"])
         inner = ctk.CTkFrame(self, fg_color="transparent")
-        inner.pack(padx=12, pady=7)
+        inner.pack(padx=14, pady=8)
 
         self.dot = ctk.CTkLabel(inner, text="●", font=(FONT, 11),
                                  text_color=C["text3"])
@@ -827,12 +1057,13 @@ class StatusBadge(ctk.CTkFrame):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 🧩 COMPONENT: SEARCH BAR
+# 🧩 SEARCH BAR
 # ═══════════════════════════════════════════════════════════════
 class SearchBar(ctk.CTkFrame):
     def __init__(self, master, on_change, placeholder="جستجو..."):
-        super().__init__(master, fg_color=C["inner"], corner_radius=12,
-                          border_width=1, border_color=C["divider"], height=46)
+        super().__init__(master, fg_color=C["glass"], corner_radius=14,
+                          border_width=1, border_color=C["glass_border"],
+                          height=48)
         self.pack_propagate(False)
         self._on_change = on_change
 
@@ -844,12 +1075,12 @@ class SearchBar(ctk.CTkFrame):
 
         self.entry = ctk.CTkEntry(
             self, textvariable=self.var, placeholder_text=placeholder,
-            font=F(11), height=44, corner_radius=0,
+            font=F(11), height=46, corner_radius=0,
             fg_color="transparent", border_width=0, text_color=C["text"])
         self.entry.pack(side="right", fill="x", expand=True, padx=(0, 4))
 
         ctk.CTkButton(self, text="✕", font=F(11, "bold"),
-                       fg_color="transparent", hover_color=C["card_hover"],
+                       fg_color="transparent", hover_color=C["glass_hover"],
                        text_color=C["text3"], width=32, height=32,
                        corner_radius=8, command=self._clear
                        ).pack(side="left", padx=(4, 10))
@@ -865,16 +1096,16 @@ class SearchBar(ctk.CTkFrame):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 🧩 COMPONENT: FILTER PILL
+# 🧩 FILTER PILL
 # ═══════════════════════════════════════════════════════════════
 class FilterPill(ctk.CTkButton):
     def __init__(self, master, label, key, color, command):
         super().__init__(master, text=label, font=F(10, "bold"),
-                          fg_color=C["inner"],
-                          hover_color=hex_alpha(color, 0.25, C["card_hover"]),
-                          text_color=C["text2"], corner_radius=10,
-                          height=36, width=92, border_width=1,
-                          border_color=C["divider"],
+                          fg_color=C["glass"],
+                          hover_color=hex_alpha(color, 0.25, C["glass_hover"]),
+                          text_color=C["text2"], corner_radius=12,
+                          height=38, width=92, border_width=1,
+                          border_color=C["glass_border"],
                           command=lambda: command(key))
         self._key = key
         self._color = color
@@ -884,17 +1115,17 @@ class FilterPill(ctk.CTkButton):
             self.configure(fg_color=self._color, text_color="#0A0E18",
                             border_color=self._color)
         else:
-            self.configure(fg_color=C["inner"], text_color=C["text2"],
-                            border_color=C["divider"])
+            self.configure(fg_color=C["glass"], text_color=C["text2"],
+                            border_color=C["glass_border"])
 
 
 # ═══════════════════════════════════════════════════════════════
-# 🧩 COMPONENT: SPARKLINE
+# 🧩 SPARKLINE
 # ═══════════════════════════════════════════════════════════════
 class Sparkline(tk.Canvas):
-    def __init__(self, master, width=220, height=38):
+    def __init__(self, master, width=220, height=40):
         super().__init__(master, width=width, height=height,
-                          bg=C["card"], bd=0, highlightthickness=0)
+                          bg=C["glass"], bd=0, highlightthickness=0)
         self._width = width
         self._height = height
         self._data = []
@@ -919,7 +1150,7 @@ class Sparkline(tk.Canvas):
         if len(self._data) < 2:
             self.create_line(10, self._height // 2,
                               self._width - 10, self._height // 2,
-                              fill=C["divider"], width=1, dash=(3, 4))
+                              fill=C["glass_border"], width=1, dash=(3, 4))
             return
 
         d = self._data
@@ -937,7 +1168,7 @@ class Sparkline(tk.Canvas):
 
         is_up = d[-1] >= d[0]
         line_color = C["success"] if is_up else C["danger"]
-        fill_color = hex_alpha(line_color, 0.20, C["card"])
+        fill_color = hex_alpha(line_color, 0.20, C["glass"])
 
         poly = [(pad_x, h - pad_y)] + pts + [(w - pad_x, h - pad_y)]
         flat = [c for p in poly for c in p]
@@ -949,17 +1180,17 @@ class Sparkline(tk.Canvas):
 
         lx, ly = pts[-1]
         self.create_oval(lx - 5, ly - 5, lx + 5, ly + 5,
-                          fill=hex_alpha(line_color, 0.3, C["card"]), outline="")
+                          fill=hex_alpha(line_color, 0.3, C["glass"]), outline="")
         self.create_oval(lx - 3, ly - 3, lx + 3, ly + 3,
                           fill=line_color, outline=line_color)
 
 
 # ═══════════════════════════════════════════════════════════════
-# 🧩 COMPONENT: CURRENCY CARD
+# 🧩 CURRENCY CARD — GLASS EDITION
 # ═══════════════════════════════════════════════════════════════
 class CurrencyCard(ctk.CTkFrame):
     def __init__(self, master, item):
-        super().__init__(master, fg_color=C["card"], corner_radius=20,
+        super().__init__(master, fg_color=C["card"], corner_radius=22,
                           border_width=1, border_color=C["card_border"])
         self.item = item
         self.accent = item.get("accent", C["gold"])
@@ -976,6 +1207,7 @@ class CurrencyCard(ctk.CTkFrame):
         self.bind("<Leave>", self._on_leave, add="+")
 
     def _build(self):
+        # ── نوار بالای کارت (accent bar) ──
         self.accent_bar = ctk.CTkFrame(self, fg_color=self.accent,
                                         height=3, corner_radius=2)
         self.accent_bar.pack(fill="x", padx=16, pady=(14, 0))
@@ -983,6 +1215,7 @@ class CurrencyCard(ctk.CTkFrame):
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=18, pady=16)
 
+        # ── هدر: آیکون + نام + کد ──
         head = ctk.CTkFrame(body, fg_color="transparent")
         head.pack(fill="x")
 
@@ -995,10 +1228,11 @@ class CurrencyCard(ctk.CTkFrame):
             command=self._toggle_fav)
         self.fav_btn.pack(side="left", padx=(4, 0))
 
+        # آیکون با هاله‌ی رنگی
         self.icon_frame = ctk.CTkFrame(
-            head, fg_color=hex_alpha(self.accent, 0.14, C["card"]),
-            width=64, height=64, corner_radius=18, border_width=2,
-            border_color=hex_alpha(self.accent, 0.45, C["card"]))
+            head, fg_color=hex_alpha(self.accent, 0.12, C["glass"]),
+            width=66, height=66, corner_radius=20, border_width=2,
+            border_color=hex_alpha(self.accent, 0.45, C["glass"]))
         self.icon_frame.pack(side="right")
         self.icon_frame.pack_propagate(False)
 
@@ -1027,10 +1261,20 @@ class CurrencyCard(ctk.CTkFrame):
                      font=F(9), text_color=C["text4"]
                      ).pack(side="right")
 
-        self.price_box = ctk.CTkFrame(body, fg_color=C["inner"],
-                                        corner_radius=14, border_width=1,
-                                        border_color=C["inner_border"], height=96)
-        self.price_box.pack(fill="x", pady=(18, 12))
+        # ── کادر قیمت شیشه‌ای ──
+        self.price_outer = ctk.CTkFrame(
+            body,
+            fg_color=hex_alpha(self.accent, 0.10, C["card"]),
+            corner_radius=18, border_width=1,
+            border_color=hex_alpha(self.accent, 0.30, C["card"]),
+            height=104)
+        self.price_outer.pack(fill="x", pady=(18, 12))
+        self.price_outer.pack_propagate(False)
+
+        self.price_box = ctk.CTkFrame(
+            self.price_outer, fg_color=C["glass"],
+            corner_radius=16, border_width=0)
+        self.price_box.pack(fill="both", expand=True, padx=2, pady=2)
         self.price_box.pack_propagate(False)
 
         self.price_inner = ctk.CTkFrame(self.price_box, fg_color="transparent")
@@ -1049,6 +1293,7 @@ class CurrencyCard(ctk.CTkFrame):
                                            text_color=C["gold"], anchor="e")
         self.currency_lbl.pack(side="right", padx=(0, 6))
 
+        # ردیف درصد تغییر
         self.change_row = ctk.CTkFrame(self.price_inner, fg_color="transparent")
         self.change_row.pack(fill="x", pady=(4, 0))
 
@@ -1067,9 +1312,11 @@ class CurrencyCard(ctk.CTkFrame):
                                             text_color=C["text4"], anchor="e")
         self.change_period.pack(side="right", padx=(0, 6))
 
-        self.spark = Sparkline(body, width=220, height=38)
+        # ── Sparkline ──
+        self.spark = Sparkline(body, width=220, height=40)
         self.spark.pack(fill="x", pady=(0, 10))
 
+        # ── فوتر ──
         foot = ctk.CTkFrame(body, fg_color="transparent")
         foot.pack(fill="x")
 
@@ -1087,7 +1334,7 @@ class CurrencyCard(ctk.CTkFrame):
                      text_color=C["text4"], anchor="w").pack(side="left")
 
     def _load_icon(self):
-        img = load_icon(self.item["key"], size=(50, 50))
+        img = load_icon(self.item["key"], size=(52, 52))
         if img is not None:
             self._icon_img = img
             self.icon_label.configure(image=img, text="")
@@ -1100,9 +1347,10 @@ class CurrencyCard(ctk.CTkFrame):
     def _on_enter(self, _=None):
         try:
             self.configure(fg_color=C["card_hover"], border_color=self.accent)
-            self.price_box.configure(
-                fg_color=C["card_active"],
-                border_color=hex_alpha(self.accent, 0.4, C["card_active"]))
+            self.price_box.configure(fg_color=C["glass_hover"])
+            self.price_outer.configure(
+                fg_color=hex_alpha(self.accent, 0.16, C["card"]),
+                border_color=hex_alpha(self.accent, 0.55, C["card"]))
             self.spark.set_colors(C["card_hover"])
         except Exception:
             pass
@@ -1110,8 +1358,10 @@ class CurrencyCard(ctk.CTkFrame):
     def _on_leave(self, _=None):
         try:
             self.configure(fg_color=C["card"], border_color=C["card_border"])
-            self.price_box.configure(fg_color=C["inner"],
-                                       border_color=C["inner_border"])
+            self.price_box.configure(fg_color=C["glass"])
+            self.price_outer.configure(
+                fg_color=hex_alpha(self.accent, 0.10, C["card"]),
+                border_color=hex_alpha(self.accent, 0.30, C["card"]))
             self.spark.set_colors(C["card"])
         except Exception:
             pass
@@ -1232,20 +1482,20 @@ class CurrencyCard(ctk.CTkFrame):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 🧩 COMPONENT: MARKET OVERVIEW CARD
+# 🧩 MARKET OVERVIEW CARD
 # ═══════════════════════════════════════════════════════════════
 class MarketOverviewCard(ctk.CTkFrame):
     def __init__(self, master, icon_key, fallback_icon, title, value, color):
-        super().__init__(master, fg_color=C["card"], corner_radius=16,
-                          border_width=1, border_color=C["card_border"])
+        super().__init__(master, fg_color=C["glass"], corner_radius=18,
+                          border_width=1, border_color=C["glass_border"])
 
         inner = ctk.CTkFrame(self, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=16, pady=14)
+        inner.pack(fill="both", expand=True, padx=18, pady=16)
 
         self.icon_box = ctk.CTkFrame(
-            inner, fg_color=hex_alpha(color, 0.15, C["card"]),
-            width=50, height=50, corner_radius=14, border_width=1,
-            border_color=hex_alpha(color, 0.35, C["card"]))
+            inner, fg_color=hex_alpha(color, 0.15, C["glass"]),
+            width=52, height=52, corner_radius=16, border_width=1,
+            border_color=hex_alpha(color, 0.35, C["glass"]))
         self.icon_box.pack(side="right", padx=(0, 12))
         self.icon_box.pack_propagate(False)
 
@@ -1272,42 +1522,6 @@ class MarketOverviewCard(ctk.CTkFrame):
         self.value_lbl.configure(text=value)
         if color:
             self.value_lbl.configure(text_color=color)
-
-
-# ═══════════════════════════════════════════════════════════════
-# 🧩 COMPONENT: CLOCK CHIP
-# ═══════════════════════════════════════════════════════════════
-class ClockChip(ctk.CTkFrame):
-    def __init__(self, master, city, tz, country):
-        super().__init__(master, fg_color=C["card"], corner_radius=14,
-                          border_width=1, border_color=C["card_border"])
-        self.tz = tz
-
-        inner = ctk.CTkFrame(self, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=14, pady=12)
-
-        top = ctk.CTkFrame(inner, fg_color="transparent")
-        top.pack(fill="x")
-
-        ctk.CTkLabel(top, text=city, font=F(12, "bold"),
-                     text_color=C["text"]).pack(side="right")
-        ctk.CTkLabel(top, text=country, font=F(8, "bold"),
-                     text_color=C["gold"]).pack(side="left")
-
-        self.time_lbl = ctk.CTkLabel(inner, text="--:--",
-                                       font=(FONT, 22, "bold"),
-                                       text_color=C["gold"])
-        self.time_lbl.pack(anchor="e", pady=(6, 0))
-
-        self.divider = ctk.CTkFrame(inner, fg_color=C["gold"],
-                                      height=2, corner_radius=1)
-        self.divider.pack(fill="x", pady=(8, 0))
-
-    def update_time(self):
-        try:
-            self.time_lbl.configure(text=to_fa(get_city_time(self.tz)))
-        except Exception:
-            pass
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1348,7 +1562,8 @@ class CalculatorDialog(ctk.CTkToplevel):
         self.destroy()
 
     def _build(self):
-        head = ctk.CTkFrame(self, fg_color=C["card"], corner_radius=0, height=90)
+        head = ctk.CTkFrame(self, fg_color=C["glass"], corner_radius=0,
+                             height=90)
         head.pack(fill="x")
         head.pack_propagate(False)
 
@@ -1377,7 +1592,7 @@ class CalculatorDialog(ctk.CTkToplevel):
 
         self.amount_entry = ctk.CTkEntry(
             body, placeholder_text="مثلاً ۵", font=F(15), height=50,
-            corner_radius=11, fg_color=C["inner"], border_color=C["divider"],
+            corner_radius=11, fg_color=C["glass"], border_color=C["glass_border"],
             text_color=C["text"], justify="center")
         self.amount_entry.pack(fill="x", pady=(0, 16))
 
@@ -1387,7 +1602,7 @@ class CalculatorDialog(ctk.CTkToplevel):
         names = [it["name"] for it in ITEMS]
         self.currency_menu = ctk.CTkOptionMenu(
             body, values=names, font=F(12), height=50,
-            fg_color=C["inner"], button_color=C["divider"],
+            fg_color=C["glass"], button_color=C["glass_border"],
             button_hover_color=C["gold"], text_color=C["text"],
             dropdown_font=F(11), corner_radius=11)
         self.currency_menu.pack(fill="x", pady=(0, 20))
@@ -1438,7 +1653,7 @@ class CalculatorDialog(ctk.CTkToplevel):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 🔄 UPDATE DIALOG — پنجره‌ی آپدیت خودکار
+# 🔄 UPDATE DIALOG
 # ═══════════════════════════════════════════════════════════════
 class UpdateDialog(ctk.CTkToplevel):
     def __init__(self, parent, update_info):
@@ -1478,7 +1693,7 @@ class UpdateDialog(ctk.CTkToplevel):
         self.destroy()
 
     def _build(self):
-        head = ctk.CTkFrame(self, fg_color=C["card"], corner_radius=0, height=100)
+        head = ctk.CTkFrame(self, fg_color=C["glass"], corner_radius=0, height=100)
         head.pack(fill="x")
         head.pack_propagate(False)
 
@@ -1511,9 +1726,9 @@ class UpdateDialog(ctk.CTkToplevel):
                      font=F(12, "bold"), text_color=C["gold"],
                      anchor="e").pack(anchor="e", pady=(0, 8))
 
-        changelog_box = ctk.CTkFrame(body, fg_color=C["inner"],
-                                       corner_radius=12, border_width=1,
-                                       border_color=C["inner_border"])
+        changelog_box = ctk.CTkFrame(body, fg_color=C["glass"],
+                                       corner_radius=14, border_width=1,
+                                       border_color=C["glass_border"])
         changelog_box.pack(fill="x", pady=(0, 18))
 
         changelog_text = self.info.get("changelog", "—") or "—"
@@ -1528,7 +1743,7 @@ class UpdateDialog(ctk.CTkToplevel):
 
         self.progress = ctk.CTkProgressBar(
             body, height=14, corner_radius=7,
-            progress_color=C["gold"], fg_color=C["inner"])
+            progress_color=C["gold"], fg_color=C["glass"])
         self.progress.pack(fill="x", pady=(0, 6))
         self.progress.set(0)
 
@@ -1541,7 +1756,7 @@ class UpdateDialog(ctk.CTkToplevel):
 
         self.cancel_btn = ctk.CTkButton(
             btns, text="بعداً", font=F(12, "bold"),
-            fg_color=C["inner"], hover_color=C["card_hover"],
+            fg_color=C["glass"], hover_color=C["glass_hover"],
             text_color=C["text2"], corner_radius=11, height=50, width=130,
             command=self._on_close)
         self.cancel_btn.pack(side="left")
@@ -1561,12 +1776,6 @@ class UpdateDialog(ctk.CTkToplevel):
         threading.Thread(target=self._do_update, daemon=True).start()
 
     def _do_update(self):
-        try:
-            import update_checker as uc
-        except ImportError:
-            self.after(0, lambda: self._on_error("ماژول update_checker پیدا نشد"))
-            return
-
         url = self.info.get("download_url", "")
 
         def progress_cb(pct):
@@ -1575,7 +1784,7 @@ class UpdateDialog(ctk.CTkToplevel):
             except Exception:
                 pass
 
-        ok, tmp_path, err = uc.download_update(url, progress_callback=progress_cb)
+        ok, tmp_path, err = download_update(url, progress_callback=progress_cb)
 
         if not ok:
             self.after(0, lambda: self._on_error(f"دانلود ناموفق: {err}"))
@@ -1586,7 +1795,7 @@ class UpdateDialog(ctk.CTkToplevel):
 
         version = self.info.get("latest_version", "0.0")
         changelog = self.info.get("changelog", "")
-        ok, err, backup = uc.install_update(tmp_path, version, changelog)
+        ok, err, backup = install_update(tmp_path, version, changelog)
 
         if not ok:
             self.after(0, lambda: self._on_error(f"نصب ناموفق: {err}"))
@@ -1627,16 +1836,12 @@ class UpdateDialog(ctk.CTkToplevel):
 
     def _restart(self):
         try:
-            import update_checker as uc
-        except ImportError:
-            return
-        try:
             self.grab_release()
         except Exception:
             pass
         self.destroy()
 
-        if uc.restart_app():
+        if restart_app():
             try:
                 self.parent._on_close()
             except Exception:
@@ -1658,7 +1863,7 @@ class TeleCoinApp(ctk.CTk):
         sound.set_enabled(self.config_data.get("sound", True))
         sound.set_volume(self.config_data.get("volume", 70) / 100.0)
 
-        self.title("TeleCoin Pro — ترمینال حرفه‌ای بازار")
+        self.title("TeleCoin Pro — Glass Edition")
         self.geometry("1440x920")
         self.minsize(1150, 750)
         self.configure(fg_color=C["bg"])
@@ -1676,7 +1881,6 @@ class TeleCoinApp(ctk.CTk):
         self.calc_window = None
         self.settings_window = None
         self.update_window = None
-        self.clock_chips = []
         self._price_queue = queue.Queue()
         self._last_update = "—"
         self._grid_cols = 4
@@ -1695,14 +1899,12 @@ class TeleCoinApp(ctk.CTk):
 
         self.after(300, self.load_all_prices)
         self._start_polling()
-        self.after(1000, self._tick_clocks)
         self._schedule_auto_refresh()
-        # 🔄 چک خودکار آپدیت ۵ ثانیه بعد از شروع
         self.after(5000, lambda: self._check_update(silent=True))
 
     def _set_app_icon(self):
         try:
-            ico_path = os.path.join(BASE_DIR, "icon.ico")
+            ico_path = os.path.join(APP_DIR, "icon.ico")
             if os.path.exists(ico_path):
                 self.iconbitmap(ico_path)
                 return
@@ -1724,14 +1926,15 @@ class TeleCoinApp(ctk.CTk):
         self.main.pack(fill="both", expand=True, padx=18, pady=18)
 
     def _build_topbar(self):
-        self.topbar = ctk.CTkFrame(self.main, fg_color=C["topbar"],
-                                    corner_radius=18, border_width=1,
-                                    border_color=C["card_border"], height=92)
+        self.topbar = ctk.CTkFrame(
+            self.main, fg_color=C["glass"],
+            corner_radius=20, border_width=1,
+            border_color=C["glass_border"], height=96)
         self.topbar.pack(fill="x", pady=(0, 14))
         self.topbar.pack_propagate(False)
 
         inner = ctk.CTkFrame(self.topbar, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=24, pady=18)
+        inner.pack(fill="both", expand=True, padx=26, pady=20)
 
         brand = ctk.CTkFrame(inner, fg_color="transparent")
         brand.pack(side="right")
@@ -1770,32 +1973,34 @@ class TeleCoinApp(ctk.CTk):
                                               text_color=C["text2"])
         self.last_update_lbl.pack(anchor="e", pady=(2, 0))
 
-        # 🔄 دکمه بررسی آپدیت
         self.update_btn = ctk.CTkButton(
             right, text="🔄", command=self._check_update,
-            font=(FONT, 16, "bold"), fg_color=C["card_hover"],
-            hover_color=hex_alpha(C["cyan"], 0.25, C["card_hover"]),
-            text_color=C["cyan"], corner_radius=10, width=44, height=44)
+            font=(FONT, 16, "bold"), fg_color=C["glass"],
+            hover_color=hex_alpha(C["cyan"], 0.25, C["glass_hover"]),
+            text_color=C["cyan"], corner_radius=12, width=46, height=46,
+            border_width=1, border_color=C["glass_border"])
         self.update_btn.pack(side="left", padx=4)
 
         self.settings_btn = ctk.CTkButton(
             right, text="⚙", command=self._open_settings,
-            font=(FONT, 16, "bold"), fg_color=C["card_hover"],
-            hover_color=hex_alpha(C["gold"], 0.25, C["card_hover"]),
-            text_color=C["text2"], corner_radius=10, width=44, height=44)
+            font=(FONT, 16, "bold"), fg_color=C["glass"],
+            hover_color=hex_alpha(C["gold"], 0.25, C["glass_hover"]),
+            text_color=C["text2"], corner_radius=12, width=46, height=46,
+            border_width=1, border_color=C["glass_border"])
         self.settings_btn.pack(side="left", padx=4)
 
         self.calc_btn = ctk.CTkButton(
             right, text="∑  ماشین حساب", command=self._open_calculator,
-            font=F(11, "bold"), fg_color=C["inner"],
-            hover_color=C["card_hover"], text_color=C["text"],
-            corner_radius=10, height=44, width=150)
+            font=F(11, "bold"), fg_color=C["glass"],
+            hover_color=C["glass_hover"], text_color=C["text"],
+            corner_radius=12, height=46, width=150,
+            border_width=1, border_color=C["glass_border"])
         self.calc_btn.pack(side="left", padx=4)
 
         self.refresh_btn = ctk.CTkButton(
             right, text="↻  بروزرسانی", command=self.load_all_prices,
             font=F(11, "bold"), fg_color=C["gold"], hover_color=C["gold_hi"],
-            text_color="#0A0E18", corner_radius=10, height=44, width=140)
+            text_color="#0A0E18", corner_radius=12, height=46, width=140)
         self.refresh_btn.pack(side="left", padx=4)
 
     def _build_overview(self):
@@ -1824,9 +2029,9 @@ class TeleCoinApp(ctk.CTk):
         self.ov_status.grid(row=0, column=3, sticky="nsew", padx=(7, 0))
 
     def _build_toolbar(self):
-        self.toolbar = ctk.CTkFrame(self.main, fg_color=C["topbar"],
-                                     corner_radius=16, border_width=1,
-                                     border_color=C["card_border"])
+        self.toolbar = ctk.CTkFrame(self.main, fg_color=C["glass"],
+                                     corner_radius=18, border_width=1,
+                                     border_color=C["glass_border"])
         self.toolbar.pack(fill="x", pady=(0, 14))
 
         inner = ctk.CTkFrame(self.toolbar, fg_color="transparent")
@@ -1858,21 +2063,6 @@ class TeleCoinApp(ctk.CTk):
             self.filter_pills[key] = pill
 
         self.filter_pills["all"].set_active(True)
-
-        row2 = ctk.CTkFrame(inner, fg_color="transparent")
-        row2.pack(fill="x", pady=(14, 0))
-
-        ctk.CTkLabel(row2, text="🕐 ساعت جهانی", font=F(11, "bold"),
-                     text_color=C["text3"]).pack(side="right", padx=(0, 14))
-
-        clocks = ctk.CTkFrame(row2, fg_color="transparent")
-        clocks.pack(side="right", fill="x", expand=True)
-
-        self.clock_chips = []
-        for city, tz, country in CITIES:
-            chip = ClockChip(clocks, city, tz, country)
-            chip.pack(side="right", padx=4, fill="x", expand=True)
-            self.clock_chips.append(chip)
 
     def _set_filter(self, key):
         self.current_filter = key
@@ -2070,11 +2260,7 @@ class TeleCoinApp(ctk.CTk):
             return
         self.calc_window = CalculatorDialog(self, self.prices)
 
-    # ═══════════════════════════════════════════════════════════
-    # 🔄 AUTO-UPDATE METHODS
-    # ═══════════════════════════════════════════════════════════
     def _check_update(self, silent=False):
-        """بررسی آپدیت — اگه silent=True باشه، پنجره فقط وقتی نسخه‌ی جدید بود باز می‌شه"""
         try:
             self.update_btn.configure(state="disabled", text="…")
         except Exception:
@@ -2082,12 +2268,7 @@ class TeleCoinApp(ctk.CTk):
 
         def worker():
             try:
-                import update_checker as uc
-                info = uc.check_for_update(timeout=10)
-            except ImportError:
-                info = {"available": False,
-                        "error": "ماژول update_checker نصب نیست",
-                        "current_version": "?", "latest_version": "?"}
+                info = check_for_update(timeout=10)
             except Exception as e:
                 info = {"available": False, "error": str(e),
                         "current_version": "?", "latest_version": "?"}
@@ -2109,7 +2290,6 @@ class TeleCoinApp(ctk.CTk):
             return
 
         if info.get("available"):
-            # اگه پنجره‌ی آپدیت بازه، دوباره باز نکن
             if (self.update_window and
                     self.update_window.winfo_exists()):
                 self.update_window.lift()
@@ -2139,7 +2319,7 @@ class TeleCoinApp(ctk.CTk):
         dlg.grab_set()
 
         try:
-            ico_path = os.path.join(BASE_DIR, "icon.ico")
+            ico_path = os.path.join(APP_DIR, "icon.ico")
             if os.path.exists(ico_path):
                 dlg.iconbitmap(ico_path)
         except Exception:
@@ -2154,7 +2334,7 @@ class TeleCoinApp(ctk.CTk):
         except Exception:
             pass
 
-        head = ctk.CTkFrame(dlg, fg_color=C["card"], corner_radius=0, height=76)
+        head = ctk.CTkFrame(dlg, fg_color=C["glass"], corner_radius=0, height=76)
         head.pack(fill="x")
         head.pack_propagate(False)
         ctk.CTkLabel(head, text="⚙  تنظیمات", font=F(19, "bold"),
@@ -2162,7 +2342,7 @@ class TeleCoinApp(ctk.CTk):
 
         scroll = ctk.CTkScrollableFrame(
             dlg, fg_color=C["bg"],
-            scrollbar_button_color=C["divider"],
+            scrollbar_button_color=C["glass_border"],
             scrollbar_button_hover_color=C["gold"])
         scroll.pack(fill="both", expand=True, padx=16, pady=16)
 
@@ -2208,7 +2388,7 @@ class TeleCoinApp(ctk.CTk):
         ctk.CTkButton(
             scroll, text="🔔  تست صدا",
             font=F(10, "bold"),
-            fg_color=C["inner"], hover_color=C["card_hover"],
+            fg_color=C["glass"], hover_color=C["glass_hover"],
             text_color=C["text2"], corner_radius=10, height=36,
             command=lambda: sound.play("update", blocking=False)
         ).pack(fill="x", pady=(10, 4))
@@ -2223,8 +2403,8 @@ class TeleCoinApp(ctk.CTk):
         ctk.CTkOptionMenu(
             scroll, values=interval_options,
             variable=self.refresh_interval_var,
-            font=F(11), height=44, fg_color=C["inner"],
-            button_color=C["divider"], button_hover_color=C["gold"],
+            font=F(11), height=44, fg_color=C["glass"],
+            button_color=C["glass_border"], button_hover_color=C["gold"],
             text_color=C["text"], dropdown_font=F(11), corner_radius=10,
             command=self._save_refresh_interval
         ).pack(fill="x", pady=(4, 16))
@@ -2246,8 +2426,8 @@ class TeleCoinApp(ctk.CTk):
                      ).pack(anchor="e", pady=(10, 6))
 
     def _settings_row(self, parent, label, value):
-        row = ctk.CTkFrame(parent, fg_color=C["card"], corner_radius=10,
-                            border_width=1, border_color=C["card_border"])
+        row = ctk.CTkFrame(parent, fg_color=C["glass"], corner_radius=10,
+                            border_width=1, border_color=C["glass_border"])
         row.pack(fill="x", pady=4)
         r_in = ctk.CTkFrame(row, fg_color="transparent")
         r_in.pack(fill="x", padx=14, pady=10)
@@ -2487,20 +2667,6 @@ class TeleCoinApp(ctk.CTk):
                 args=("TeleCoin — تغییرات بازار", "\n".join(lines)),
                 daemon=True).start()
 
-    def _tick_clocks(self):
-        if self._closing:
-            return
-        try:
-            for chip in self.clock_chips:
-                if chip.winfo_exists():
-                    chip.update_time()
-        except Exception:
-            pass
-        try:
-            self.after(1000, self._tick_clocks)
-        except Exception:
-            pass
-
     def _on_close(self):
         self._closing = True
         try:
@@ -2532,7 +2698,7 @@ class TeleCoinApp(ctk.CTk):
 # ═══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     print("═" * 62)
-    print("  💰  TeleCoin Pro — Market Terminal v6.4")
+    print("  💰  TeleCoin Pro — Glass Edition v7.0")
     print(f"  📊 {len(ITEMS)} markets | File: 1.py")
     print("═" * 62)
     print("\n[1/2]  آماده‌سازی فونت‌ها...")
