@@ -1,7 +1,7 @@
 {
-  "version": "7.0",
+  "version": "7.1",
   "release_date": "2026-10-07",
   "download_url": "https://raw.githubusercontent.com/MRRooid/telecoin/main/1.py",
-  "changelog": "🔧 رفع مشکل آپدیت\n✅ برگشت به نسخه‌ی سالم",
+  "changelog": "🎨 طراحی شیشه‌ای جدید\n✅ حذف ساعت‌های جهانی\n✅ کارت‌های مدرن\n✅ بهبود ظاهر کلی",
   "min_version": "6.0"
 }
