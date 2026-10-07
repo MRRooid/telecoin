@@ -1,7 +1,7 @@
 {
-  "version": "6.5",
+  "version": "7.0",
   "release_date": "2026-10-07",
   "download_url": "https://raw.githubusercontent.com/MRRooid/telecoin/main/1.py",
-  "changelog": "تست آپدیت خودکار",
+  "changelog": "🔧 رفع مشکل آپدیت\n✅ برگشت به نسخه‌ی سالم",
   "min_version": "6.0"
 }
